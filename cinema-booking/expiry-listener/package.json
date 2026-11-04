@@ -1,0 +1,11 @@
+{
+  "name": "expiry-listener",
+  "version": "1.0.0",
+  "description": "Nghe su kien het han cua Redis, bao ghe trong lai cho moi trinh duyet",
+  "main": "src/listener.js",
+  "scripts": { "start": "node src/listener.js" },
+  "dependencies": {
+    "@socket.io/redis-emitter": "^5.1.0",
+    "ioredis": "^5.4.1"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "payment-worker",
+  "version": "1.0.0",
+  "description": "Lay don thanh toan tu RabbitMQ, ghi ve vao PostgreSQL",
+  "main": "src/worker.js",
+  "scripts": { "start": "node src/worker.js" },
+  "dependencies": {
+    "@socket.io/redis-emitter": "^5.1.0",
+    "amqplib": "^0.10.4",
+    "ioredis": "^5.4.1",
+    "pg": "^8.13.0"
+  }
+}

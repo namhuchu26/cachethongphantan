@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chọn ghế – CinemaDS</title>
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+<main>
+  <div class="panel">
+    <h2 id="title">Đang tải…</h2>
+    <div class="muted" id="subtitle"></div>
+  </div>
+
+  <div class="layout">
+    <section class="panel">
+      <div class="screen"></div>
+      <div class="screen-label">MÀN HÌNH</div>
+      <div class="seatmap" id="seatmap"></div>
+      <div class="legend">
+        <span><i style="background:var(--free)"></i>Trống</span>
+        <span><i style="background:var(--mine)"></i>Bạn đang giữ</span>
+        <span><i style="background:var(--held)"></i>Người khác đang giữ</span>
+        <span><i style="background:var(--sold)"></i>Đã bán</span>
+        <span><i style="background:var(--free);box-shadow:inset 0 -3px 0 var(--vip)"></i>VIP</span>
+      </div>
+      <p class="muted" style="text-align:center;font-size:13px;margin-top:14px">
+        Bấm vào ghế để <b>giữ ngay</b> (tối đa 8 ghế) – khách khác thấy ghế chuyển vàng tức thì. Bấm lại ghế của bạn để bỏ.
+      </p>
+    </section>
+
+    <aside>
+      <section class="panel summary">
+        <h3>Vé của bạn</h3>
+        <div id="needLogin" class="msg info" hidden>Hãy <a href="/index.html">đăng nhập</a> để chọn ghế.</div>
+        <div class="line"><span>Ghế</span><b id="seatList">–</b></div>
+        <div class="line"><span>Tổng tiền</span><b id="total">0 đ</b></div>
+        <div class="countdown" id="countdown" hidden></div>
+        <div class="row">
+          <button id="btnPay" disabled>Thanh toán</button>
+          <button id="btnRelease" class="secondary" disabled>Bỏ chọn tất cả</button>
+        </div>
+        <div id="msg"></div>
+        <div id="ticket"></div>
+        <p class="muted" style="font-size:12px">
+          <a href="#" id="btnDup">Thử gửi trùng thanh toán 2 lần (kịch bản D6)</a>
+        </p>
+        <p class="muted" style="font-size:12px;margin:0">WebSocket nối với: <b id="sockServer">–</b></p>
+      </section>
+    </aside>
+  </div>
+</main>
+
+<script src="/socket.io/socket.io.js"></script>
+<script src="/assets/app.js"></script>
+<script>
+  App.header();
+  const showtimeId = Number(new URLSearchParams(location.search).get('showtime') || 1);
+  const holdStoreKey = `hold:${showtimeId}`;
+  const MAX_SEATS = 8;
+  const $ = (id) => document.getElementById(id);
+
+  let showtime = null;
+  const seats = new Map();          // seatId → {id,label,type,status,holder}
+  const seatEls = new Map();        // seatId → <button>
+  const pendingSeats = new Set();   // ghế đang chờ server trả lời
+  // Lượt giữ của mình: { holdToken, seatIds, expiresAt, idemKey }
+  let hold = JSON.parse(sessionStorage.getItem(holdStoreKey) || 'null');
+  let paying = false;
+
+  const label = (id) => seats.get(id)?.label ?? id;
+  const priceOf = (s) => (s.type === 'vip' ? showtime.vipPrice : showtime.price);
+  const isMine = (id) => !!hold && hold.seatIds.includes(id);
+  function setHold(h) {
+    hold = h && h.seatIds.length ? h : null;
+    if (hold) sessionStorage.setItem(holdStoreKey, JSON.stringify(hold));
+    else sessionStorage.removeItem(holdStoreKey);
+  }
+
+  function msg(text, kind = 'info') { $('msg').innerHTML = text ? `<div class="msg ${kind}">${text}</div>` : ''; }
+
+  // ---------- Vẽ sơ đồ ghế ----------
+  async function loadSeatMap() {
+    const data = await App.api(`/showtimes/${showtimeId}/seats`);
+    showtime = data.showtime;
+    $('title').textContent = showtime.movie.title;
+    $('subtitle').textContent = `${App.time(showtime.startAt)} · ${showtime.room} · Ghế thường ${App.money(showtime.price)} · VIP ${App.money(showtime.vipPrice)}`;
+    seats.clear();
+    data.seats.forEach((s) => seats.set(s.id, s));
+    // Chỉ giữ lại những ghế mà server xác nhận vẫn đang thuộc về mình
+    if (hold && !paying) {
+      setHold({ ...hold, seatIds: hold.seatIds.filter((id) => seats.get(id)?.status === 'held' && seats.get(id)?.holder === App.userId) });
+    }
+    if (seatEls.size === 0) buildGrid(data.seats);
+    seats.forEach((_, id) => paint(id));
+    refreshSummary();
+  }
+
+  function buildGrid(list) {
+    const rows = new Map();
+    list.forEach((s) => { if (!rows.has(s.row)) rows.set(s.row, []); rows.get(s.row).push(s); });
+    for (const [row, items] of rows) {
+      const r = document.createElement('div');
+      r.className = 'seatrow';
+      r.innerHTML = `<span class="rowlabel">${row}</span>`;
+      items.forEach((s) => {
+        const b = document.createElement('button');
+        b.className = 'seat';
+        b.textContent = s.col;
+        b.addEventListener('click', () => onSeatClick(s.id));
+        seatEls.set(s.id, b);
+        r.append(b);
+      });
+      $('seatmap').append(r);
+    }
+  }
+
+  function paint(id, flash = false) {
+    const s = seats.get(id), el = seatEls.get(id);
+    if (!s || !el) return;
+    const mine = isMine(id) && s.status !== 'sold';
+    el.className = 'seat' + (s.type === 'vip' ? ' vip' : '')
+      + (s.status === 'sold' ? ' sold' : mine ? ' mine' : s.status === 'held' ? ' held' : '')
+      + (pendingSeats.has(id) ? ' selected' : '');
+    el.disabled = s.status === 'sold' || (s.status === 'held' && !mine);
+    el.title = s.label + (s.status === 'held' && !mine ? ` – ${s.holder} đang giữ` : mine ? ' – bấm để bỏ' : '');
+    if (flash) { el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash'); }
+  }
+
+  function refreshSummary() {
+    const ids = hold ? hold.seatIds : [];
+    $('seatList').textContent = ids.length ? ids.map(label).join(', ') : '–';
+    $('total').textContent = App.money(ids.reduce((t, id) => t + priceOf(seats.get(id)), 0));
+    $('btnPay').disabled = !hold || paying;
+    $('btnRelease').disabled = !hold || paying;
+    $('countdown').hidden = !hold || paying;
+  }
+
+  // Các lần bấm được xử lý LẦN LƯỢT (không song song) để mọi ghế vào cùng một lượt giữ
+  let queue = Promise.resolve();
+  const enqueue = (fn) => { queue = queue.then(fn).catch(() => {}); };
+
+  function onSeatClick(id) {
+    if (!App.token) { $('needLogin').hidden = false; return; }
+    if (paying) { msg('Đơn đang thanh toán, không đổi ghế được.'); return; }
+    if (pendingSeats.has(id)) return;
+    const s = seats.get(id);
+    if (isMine(id)) return enqueue(() => releaseOne(id));
+    if (s.status !== 'free') return;
+    if ((hold ? hold.seatIds.length : 0) + pendingSeats.size >= MAX_SEATS) { msg(`Chỉ được giữ tối đa ${MAX_SEATS} ghế`, 'err'); return; }
+    pendingSeats.add(id); paint(id);
+    enqueue(() => holdOne(id));
+  }
+
+  async function holdOne(id) {
+    try {
+      const r = await App.api(`/showtimes/${showtimeId}/holds`, {
+        method: 'POST', body: { seatIds: [id], holdToken: hold?.holdToken },
+      });
+      const sameHold = hold && hold.holdToken === r.holdToken;
+      setHold({ holdToken: r.holdToken, seatIds: r.seatIds, expiresAt: r.expiresAt, idemKey: sameHold ? hold.idemKey : crypto.randomUUID() });
+      r.seatIds.forEach((sid) => Object.assign(seats.get(sid), { status: 'held', holder: App.userId }));
+      msg(`Đã giữ ghế ${label(id)} (server <b>${App.lastServer}</b> xử lý).`, 'ok');
+    } catch (err) {
+      msg(`${App.esc(err.message)} <span class="muted">(server ${App.lastServer || '?'})</span>`, 'err');
+      if (err.status === 409) await loadSeatMap();
+    } finally {
+      pendingSeats.delete(id);
+      paint(id, true);
+      refreshSummary();
+    }
+  }
+
+  async function releaseOne(id) {
+    pendingSeats.add(id); paint(id);
+    try {
+      const r = await App.api(`/holds/${hold.holdToken}/seats/${id}`, { method: 'DELETE' });
+      setHold(r.holdToken ? { ...hold, seatIds: r.seatIds } : null);
+      Object.assign(seats.get(id), { status: 'free', holder: null });
+      msg(`Đã bỏ ghế ${label(id)}.`);
+    } catch (err) {
+      msg(App.esc(err.message), 'err');
+      await loadSeatMap();
+    } finally {
+      pendingSeats.delete(id);
+      paint(id);
+      refreshSummary();
+    }
+  }
+
+  $('btnRelease').addEventListener('click', () => enqueue(async () => {
+    const ids = hold.seatIds;
+    try { await App.api(`/holds/${hold.holdToken}`, { method: 'DELETE' }); } catch { /* đã hết hạn cũng không sao */ }
+    ids.forEach((id) => Object.assign(seats.get(id), { status: 'free', holder: null }));
+    setHold(null);
+    msg('Đã bỏ chọn tất cả ghế.');
+    ids.forEach((id) => paint(id));
+    refreshSummary();
+  }));
+
+  // ---------- Thanh toán ----------
+  function pay() {
+    return App.api('/bookings', {
+      method: 'POST', body: { holdToken: hold.holdToken }, headers: { 'Idempotency-Key': hold.idemKey },
+    });
+  }
+
+  $('btnPay').addEventListener('click', () => enqueue(async () => {
+    paying = true; refreshSummary();
+    try {
+      const b = await pay();
+      msg(`Đơn <b>${b.id.slice(0, 8)}</b> đã vào hàng đợi (server <b>${b.servedBy}</b> nhận). Đang chờ Payment Worker xử lý…`, 'info');
+      waitForResult(b.id);
+    } catch (err) {
+      paying = false;
+      msg(App.esc(err.message), 'err');
+      if (err.status === 409) { setHold(null); await loadSeatMap(); }
+      refreshSummary();
+    }
+  }));
+
+  // Gửi 2 request thanh toán cùng lúc với CÙNG Idempotency-Key → server chỉ tạo 1 đơn
+  $('btnDup').addEventListener('click', (e) => {
+    e.preventDefault();
+    if (!hold) { msg('Hãy chọn ghế trước rồi mới thử gửi trùng.', 'err'); return; }
+    enqueue(async () => {
+      paying = true; refreshSummary();
+      const results = await Promise.allSettled([pay(), pay()]);
+      const ok = results.filter((r) => r.status === 'fulfilled').map((r) => r.value);
+      const ids = [...new Set(ok.map((b) => b.id))];
+      msg(`Đã gửi 2 request cùng Idempotency-Key → server trả về <b>${ids.length}</b> đơn duy nhất (${ids.map((i) => i.slice(0, 8)).join(', ')}).`, 'ok');
+      if (ids[0]) waitForResult(ids[0]); else { paying = false; refreshSummary(); }
+    });
+  });
+
+  let waitingFor = null;
+  async function waitForResult(bookingId) {
+    waitingFor = bookingId;
+    // Kết quả thường đến qua WebSocket (booking_result); poll để dự phòng
+    for (let i = 0; i < 40 && waitingFor === bookingId; i++) {
+      await new Promise((r) => setTimeout(r, 1500));
+      if (waitingFor !== bookingId) return;
+      try {
+        const b = await App.api(`/bookings/${bookingId}`);
+        if (b.status !== 'PENDING') return showResult(b);
+      } catch { /* thử lại */ }
+    }
+  }
+
+  async function showResult(b) {
+    const id = b.bookingId || b.id;
+    if (waitingFor !== id) return;
+    waitingFor = null;
+    const full = b.tickets ? b : await App.api(`/bookings/${id}`);
+    paying = false;
+    if (full.status === 'PAID') {
+      msg('Thanh toán thành công!', 'ok');
+      $('ticket').innerHTML = `<div class="ticket">
+        <div class="muted">${App.esc(full.movie)} · ${App.time(full.startAt)} · ${App.esc(full.room)}</div>
+        <div>Ghế: <b>${full.tickets.join(', ')}</b> · ${App.money(full.total)}</div>
+        <div class="code">${full.code}</div><div class="muted">Mã đặt vé – đưa mã này tại quầy</div></div>`;
+    } else {
+      msg(`Đặt vé thất bại: ${App.esc(full.error)}`, 'err');
+    }
+    setHold(null);
+    await loadSeatMap();
+  }
+
+  // ---------- Đồng hồ đếm ngược (chung cho mọi ghế trong lượt giữ) ----------
+  setInterval(() => {
+    if (!hold || paying) return;
+    const left = Math.max(0, Math.round((hold.expiresAt - Date.now()) / 1000));
+    $('countdown').textContent = `${String(Math.floor(left / 60)).padStart(2, '0')}:${String(left % 60).padStart(2, '0')}`;
+    if (left === 0) {
+      msg('Hết thời gian giữ ghế, ghế đã được nhả cho người khác.', 'err');
+      setHold(null);
+      loadSeatMap();
+    }
+  }, 500);
+
+  // ---------- Realtime ----------
+  const socket = App.socket();
+  socket.on('connect', () => { socket.emit('join_showtime', showtimeId); loadSeatMap(); });
+  socket.on('hello', ({ server }) => { $('sockServer').textContent = server; });
+  socket.on('disconnect', () => { $('sockServer').textContent = 'mất kết nối, đang nối lại…'; });
+
+  socket.on('seats_held', (e) => {
+    e.seatIds.forEach((id) => { Object.assign(seats.get(id) || {}, { status: 'held', holder: e.userId }); paint(id, e.userId !== App.userId); });
+  });
+  socket.on('seats_released', (e) => {
+    e.seatIds.forEach((id) => {
+      const s = seats.get(id);
+      if (s && s.status !== 'sold') Object.assign(s, { status: 'free', holder: null });
+      if (isMine(id) && !paying) setHold({ ...hold, seatIds: hold.seatIds.filter((x) => x !== id) });
+      paint(id, true);
+    });
+    refreshSummary();
+  });
+  socket.on('seats_sold', (e) => {
+    e.seatIds.forEach((id) => { Object.assign(seats.get(id) || {}, { status: 'sold', holder: null }); paint(id, true); });
+  });
+  socket.on('seats_reset', () => { setHold(null); loadSeatMap(); });
+  socket.on('booking_result', (r) => showResult(r));
+
+  if (!App.token) $('needLogin').hidden = false;
+  setInterval(() => { if (!paying && pendingSeats.size === 0) loadSeatMap().catch(() => {}); }, 30000); // đồng bộ lại định kỳ
+</script>
+</body>
+</html>

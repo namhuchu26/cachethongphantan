@@ -1,0 +1,20 @@
+{
+  "name": "booking-service",
+  "version": "1.0.0",
+  "description": "Booking Server: API dat ve + Socket.IO, chay nhieu ban sao sau Nginx",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test tests/"
+  },
+  "dependencies": {
+    "@socket.io/redis-adapter": "^8.3.0",
+    "amqplib": "^0.10.4",
+    "express": "^4.21.0",
+    "ioredis": "^5.4.1",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.13.0",
+    "socket.io": "^4.8.0"
+  }
+}

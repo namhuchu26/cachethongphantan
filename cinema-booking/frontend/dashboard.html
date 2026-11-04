@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dashboard demo – CinemaDS</title>
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+<main>
+  <h1>Dashboard demo</h1>
+  <p class="muted">Số liệu đọc từ Redis/PostgreSQL/RabbitMQ qua API, cập nhật mỗi giây. Lần cập nhật gần nhất do <b id="answeredBy">–</b> trả lời.</p>
+
+  <section class="panel">
+    <h3>Booking Server</h3>
+    <div class="cards" id="servers"></div>
+    <p class="muted" style="font-size:12px">Thử tắt một server: <code>docker stop booking-2</code> → thẻ chuyển đỏ sau tối đa 6 giây, Nginx tự chuyển request sang server còn sống. Bật lại: <code>docker start booking-2</code>.</p>
+  </section>
+
+  <section class="panel">
+    <h3>Điều khiển demo</h3>
+    <div class="row" style="gap:28px">
+      <label class="switch"><input type="checkbox" id="lock"><span class="track"></span><span id="lockText">Khóa phân tán</span></label>
+      <div class="row">
+        <span>Thời gian giữ ghế</span>
+        <input id="ttl" type="number" min="10" max="3600" style="width:90px"> <span class="muted">giây</span>
+        <button class="secondary" id="saveTtl">Lưu</button>
+      </div>
+      <div class="row">
+        <span>Suất chiếu</span>
+        <input id="st" type="number" min="1" value="1" style="width:70px">
+        <button class="danger" id="reset">Reset suất chiếu</button>
+      </div>
+    </div>
+    <div id="ctlMsg"></div>
+  </section>
+
+  <section class="panel">
+    <h3>Số liệu</h3>
+    <div class="cards">
+      <div class="card"><div class="muted">Giữ ghế thành công</div><div class="big" id="holdOk">0</div></div>
+      <div class="card"><div class="muted">Bị từ chối (tranh chấp)</div><div class="big" id="holdConflict">0</div></div>
+      <div class="card"><div class="muted">Vé đã bán</div><div class="big" id="sold">0</div></div>
+      <div class="card"><div class="muted">Đơn PAID / FAILED / PENDING</div><div class="big" id="bookings">0</div></div>
+      <div class="card"><div class="muted">Hàng đợi payments</div><div class="big" id="queue">–</div><div class="muted" id="queueSub"></div></div>
+      <div class="card"><div class="muted">Dead-letter queue</div><div class="big" id="dlq">–</div></div>
+    </div>
+  </section>
+
+  <div class="layout">
+    <section class="panel">
+      <h3>Sơ đồ ghế suất <span id="stLabel">1</span> (realtime)</h3>
+      <div class="minimap" id="minimap"></div>
+      <p class="muted" style="font-size:12px">Vàng = đang giữ, đỏ = đã bán. Chạy <code>node loadtest/rush.js</code> để xem 5.000 request tranh 100 ghế.</p>
+    </section>
+    <section class="panel">
+      <h3>Sự kiện realtime</h3>
+      <p class="muted" style="font-size:12px;margin-top:-6px">Của suất chiếu đang chọn · tên màu cam = thành phần đã phát sự kiện</p>
+      <div class="log" id="log" style="max-height:340px"></div>
+    </section>
+  </div>
+</main>
+
+<script src="/socket.io/socket.io.js"></script>
+<script src="/assets/app.js"></script>
+<script>
+  App.header();
+  const $ = (id) => document.getElementById(id);
+  let showtimeId = 1;
+  let seatEls = new Map();
+  const seatLabels = new Map();   // seatId → "F7"
+  const labels = (ids) => ids.map((id) => seatLabels.get(id) || id).join(', ');
+
+  function log(text) {
+    const d = document.createElement('div');
+    d.innerHTML = `<span class="muted">${new Date().toLocaleTimeString('vi-VN')}</span> ${text}`;
+    $('log').prepend(d);
+    while ($('log').children.length > 200) $('log').lastChild.remove();
+  }
+  const ago = (t) => { const s = Math.round((Date.now() - t) / 1000); return s < 60 ? `${s}s` : `${Math.round(s / 60)} phút`; };
+
+  async function refresh() {
+    try {
+      const s = await App.api('/admin/stats');
+      $('answeredBy').textContent = s.answeredBy;
+      $('servers').innerHTML = s.servers.map((v) => `
+        <div class="card ${v.alive ? 'alive' : 'dead'}">
+          <div class="row" style="justify-content:space-between"><b>${v.name}</b>
+            <span class="badge ${v.alive ? 'ok' : 'bad'}">${v.alive ? 'SỐNG' : 'CHẾT'}</span></div>
+          <div class="big">${v.requests.toLocaleString('vi-VN')}</div>
+          <div class="muted">request · ${v.alive ? `chạy ${ago(v.startedAt)}` : 'không có nhịp tim'}</div>
+        </div>`).join('');
+      $('lock').checked = s.settings.lockEnabled;
+      $('lockText').innerHTML = s.settings.lockEnabled
+        ? 'Khóa phân tán: <b style="color:var(--mine)">BẬT</b>'
+        : 'Khóa phân tán: <b style="color:var(--sold)">TẮT</b> (cố ý gây lỗi đặt trùng)';
+      if (document.activeElement !== $('ttl')) $('ttl').value = s.settings.holdTtl;
+      $('holdOk').textContent = s.holds.ok.toLocaleString('vi-VN');
+      $('holdConflict').textContent = s.holds.conflicts.toLocaleString('vi-VN');
+      $('sold').textContent = s.ticketsSold;
+      $('bookings').textContent = `${s.bookings.paid} / ${s.bookings.failed} / ${s.bookings.pending}`;
+      if (s.queue) {
+        $('queue').textContent = s.queue.pending;
+        $('queueSub').innerHTML = s.queue.consumers
+          ? `${s.queue.consumers} worker đang nghe`
+          : '<span style="color:var(--sold)">không có worker nào!</span>';
+        $('dlq').textContent = s.queue.deadLetters;
+      }
+    } catch (err) {
+      $('answeredBy').textContent = `lỗi: ${err.message}`;
+    }
+  }
+
+  async function loadMinimap() {
+    const data = await App.api(`/showtimes/${showtimeId}/seats`);
+    $('stLabel').textContent = `${showtimeId} – ${data.showtime.movie.title}`;
+    const box = $('minimap');
+    box.innerHTML = '';
+    box.style.gridTemplateColumns = `repeat(${data.showtime.cols}, 16px)`;
+    seatEls = new Map();
+    data.seats.forEach((s) => {
+      const el = document.createElement('span');
+      el.title = s.label;
+      seatLabels.set(s.id, s.label);
+      el.className = s.status === 'free' ? '' : s.status;
+      seatEls.set(s.id, el);
+      box.append(el);
+    });
+  }
+
+  $('lock').addEventListener('change', async (e) => {
+    await App.api('/admin/lock', { method: 'PUT', body: { enabled: e.target.checked } });
+    log(`khóa phân tán ${e.target.checked ? 'BẬT' : 'TẮT'}`);
+    refresh();
+  });
+  $('saveTtl').addEventListener('click', async () => {
+    try {
+      await App.api('/admin/hold-ttl', { method: 'PUT', body: { seconds: Number($('ttl').value) } });
+      $('ctlMsg').innerHTML = '<div class="msg ok">Đã lưu thời gian giữ ghế (áp dụng cho lượt giữ mới).</div>';
+    } catch (err) { $('ctlMsg').innerHTML = `<div class="msg err">${App.esc(err.message)}</div>`; }
+  });
+  $('reset').addEventListener('click', async () => {
+    const id = Number($('st').value);
+    if (!confirm(`Xóa toàn bộ vé, đơn và ghế đang giữ của suất ${id}?`)) return;
+    await App.api('/admin/reset', { method: 'POST', body: { showtimeId: id } });
+    $('ctlMsg').innerHTML = `<div class="msg ok">Đã reset suất ${id}.</div>`;
+  });
+  $('st').addEventListener('change', () => {
+    socket.emit('leave_showtime', showtimeId);
+    showtimeId = Number($('st').value);
+    socket.emit('join_showtime', showtimeId);
+    loadMinimap();
+  });
+
+  const socket = App.socket();
+  socket.on('connect', () => { socket.emit('join_showtime', showtimeId); loadMinimap(); });
+  socket.on('hello', ({ server }) => log(`dashboard nối WebSocket tới <span class="srv">${server}</span>`));
+  const setSeats = (ids, cls) => ids.forEach((id) => { const el = seatEls.get(id); if (el) el.className = cls; });
+  let heldBurst = 0;
+  // Khi bắn tải có hàng trăm sự kiện/giây → chỉ ghi 30 dòng đầu mỗi 3 giây cho dễ đọc
+  socket.on('seats_held', (e) => {
+    setSeats(e.seatIds, 'held');
+    if (++heldBurst <= 30) log(`<span class="srv">${e.by}</span> <b>${App.esc(e.userId)}</b> giữ ${labels(e.seatIds)}`);
+    else if (heldBurst === 31) log('<span class="muted">… nhiều sự kiện quá, tạm ẩn bớt</span>');
+  });
+  socket.on('seats_released', (e) => {
+    setSeats(e.seatIds, '');
+    log(`<span class="srv">${e.by}</span> nhả ${labels(e.seatIds)}${e.reason === 'expired' ? ' <i>(hết thời gian giữ)</i>' : ''}`);
+  });
+  socket.on('seats_sold', (e) => { setSeats(e.seatIds, 'sold'); log(`<span class="srv">${e.by}</span> đã bán ${labels(e.seatIds)}`); });
+  socket.on('disconnect', () => log('<span style="color:var(--sold)">mất kết nối WebSocket, đang nối lại…</span>'));
+  socket.on('seats_reset', () => { log('suất chiếu đã được reset'); heldBurst = 0; loadMinimap(); });
+  setInterval(() => { heldBurst = 0; }, 3000);
+
+  refresh();
+  setInterval(refresh, 1000);
+</script>
+</body>
+</html>

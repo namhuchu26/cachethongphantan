@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CinemaDS – Đặt vé xem phim</title>
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+<main>
+  <section class="panel" id="login" hidden>
+    <h2>Đăng nhập</h2>
+    <p class="muted">Nhập tên bất kỳ để đặt vé. Mở thêm một trình duyệt khác (hoặc cửa sổ ẩn danh) với tên khác để thử hai người tranh cùng một ghế.</p>
+    <form class="row" id="loginForm">
+      <input id="name" placeholder="Tên của bạn, vd. An" required minlength="2" maxlength="30">
+      <button>Vào</button>
+    </form>
+    <div id="loginMsg"></div>
+  </section>
+
+  <h1>Phim đang chiếu</h1>
+  <div class="grid-movies" id="movies"></div>
+</main>
+
+<script src="/assets/app.js"></script>
+<script>
+  App.header();
+  const posters = ['linear-gradient(135deg,#7a2e1f,#e8a33d)', 'linear-gradient(135deg,#1f3a5a,#7aa6c2)', 'linear-gradient(135deg,#3b2a63,#e07ab8)'];
+
+  if (!App.token) document.getElementById('login').hidden = false;
+  document.getElementById('loginForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      await App.login(document.getElementById('name').value.trim());
+      location.reload();
+    } catch (err) {
+      document.getElementById('loginMsg').innerHTML = `<div class="msg err">${App.esc(err.message)}</div>`;
+    }
+  });
+
+  (async () => {
+    const movies = await App.api('/movies');
+    const box = document.getElementById('movies');
+    for (const [i, m] of movies.entries()) {
+      const showtimes = await App.api(`/movies/${m.id}/showtimes`);
+      const el = document.createElement('div');
+      el.className = 'panel movie';
+      el.innerHTML = `
+        <div class="poster" style="background:${posters[i % posters.length]}">${App.esc(m.title)}</div>
+        <div class="muted">${App.esc(m.genre)} · ${m.duration_min} phút</div>
+        <p>${App.esc(m.description)}</p>
+        <div class="showtimes">${showtimes.map((s) =>
+          `<a href="/seats.html?showtime=${s.id}">${App.time(s.start_at)} · ${App.esc(s.room_name)}</a>`).join('')}</div>`;
+      box.append(el);
+    }
+  })().catch((err) => {
+    document.getElementById('movies').innerHTML = `<div class="msg err">Không tải được danh sách phim: ${App.esc(err.message)}</div>`;
+  });
+</script>
+</body>
+</html>
